@@ -84,20 +84,13 @@ def find_nearby_restaurants(lat, lng, api_key, radius=2000):
 # ✅ 데이터 전처리
 def preprocess_restaurant_data(df):
     df['이름'] = df['이름'].astype(str).str.strip()
-    df = df[~df['이름'].isin(['-', '없음', '', None])]
     df = df.drop_duplicates(subset='이름')
     df['평점'] = pd.to_numeric(df['평점'], errors='coerce')
     df = df.dropna(subset=['평점'])
     df['주소'] = df['주소'].astype(str).str.strip()
-    df['주소'] = df['주소'].str.replace(r'^KR, ?', '', regex=True)
-    df['주소'] = df['주소'].str.replace(r'^South Korea,?\s*', '', regex=True)
-    df['주소'] = df['주소'].str.rstrip('/')
-    df = df[~df['주소'].apply(lambda x: bool(re.fullmatch(r'[A-Za-z0-9 ,.-]+', x)))]
-    df = df[df['주소'].str.strip() != '']
-    df = df.dropna(subset=['주소'])
     df = df.loc[df['평점'] > 3.5]
-    df = df.sort_values(by='평점', ascending=False)
-    return df.reset_index(drop=True)
+    return df.sort_values(by='평점', ascending=False).reset_index(drop=True)
+   
 
 # ✅ 추천 관광지 Top 5 카드 출력
 def display_top_attractions(places):
