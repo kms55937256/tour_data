@@ -5,7 +5,6 @@ import time
 import os
 import re
 import textwrap
-import base64
 from dotenv import load_dotenv
 import streamlit.components.v1 as components
 
@@ -13,6 +12,11 @@ import streamlit.components.v1 as components
 load_dotenv()
 google_key = os.getenv("Google_key")
 kakao_key = os.getenv("KAKAO_KEY")
+
+# ✅ 지역명 추출 함수
+def extract_region(address):
+    match = re.match(r"([가-힣]+)", address.strip())
+    return match.group(1) if match else ""
 
 # ✅ 구글 Place Details API → 전화번호 가져오기
 def get_place_details(place_id, api_key):
@@ -53,24 +57,11 @@ def get_reviews(place_id, api_key, max_reviews=3):
     params = {'place_id': place_id, 'fields': 'review', 'language': 'ko', 'key': api_key}
     try:
         res = requests.get(url, params=params).json()
-        reviews = res.get('result', {}).get('reviews', [])
-        return sorted(reviews, key=lambda x: x.get('time', 0), reverse=True)[:max_reviews]
+        return res.get('result', {}).get('reviews', [])[:max_reviews]
     except:
         return []
 
-# ✅ 리뷰 HTML 렌더링
-def render_reviews(reviews):
-    review_blocks = []
-    for r in reviews:
-        author = r.get('author_name', '익명')
-        rating = r.get('rating', '')
-        text = textwrap.shorten(r.get('text', ''), width=80, placeholder='…')
-        block = f"<div style='background:#f1f1f1; border-radius:8px; padding:10px; margin-top:5px;'>"
-        block += f"<b>{author}</b> ⭐ {rating}<br><span style='font-size:14px;'>{text}</span></div>"
-        review_blocks.append(block)
-    return "".join(review_blocks)
-
-# ✅ 맛집 검색 (전화번호 추가)
+# ✅ 맛집 검색 (평점·사진·리뷰 없는 가게 제외)
 def find_nearby_restaurants(lat, lng, api_key, radius=2000):
     url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
     params = {
@@ -86,19 +77,29 @@ def find_nearby_restaurants(lat, lng, api_key, radius=2000):
 
     restaurants = []
     for r in results[:15]:
+        rating = r.get('rating')
+        photos = r.get('photos', [])
         place_id = r.get('place_id')
+
+        if rating is None or not photos or place_id is None:
+            continue
+
+        reviews = get_reviews(place_id, api_key, 1)
+        if len(reviews) == 0:
+            continue
+
         phone = None
         if place_id:
             details = get_place_details(place_id, api_key)
-            phone = details.get("formatted_phone_number", None)
+            phone = details.get("formatted_phone_number")
 
         restaurants.append({
             '이름': r.get('name'),
             '주소': r.get('vicinity'),
-            '평점': r.get('rating'),
+            '평점': rating,
             '위도': r['geometry']['location']['lat'],
             '경도': r['geometry']['location']['lng'],
-            'photos': r.get('photos'),
+            'photos': photos,
             '전화번호': phone if phone else "없음",
             'place_id': place_id
         })
@@ -114,7 +115,10 @@ def preprocess_restaurant_data(df):
     df = df.loc[df['평점'] > 3.5]
     return df.sort_values(by='평점', ascending=False).reset_index(drop=True)
 
-# ✅ 추천 관광지 Top 5 카드 출력 (디자인 유지)
+# ✅ 기본 이미지
+DEFAULT_IMG = "https://via.placeholder.com/300x200?text=No+Image"
+
+# ✅ 추천 관광지 Top 5 카드 출력
 def display_top_attractions(places):
     st.markdown("---")
     st.markdown("#### ⭐ 추천 관광지 Top 5")
@@ -126,9 +130,9 @@ def display_top_attractions(places):
             address = place.get('formatted_address', '')
             place_id = place.get('place_id')
             link = f"https://www.google.com/maps/place/?q=place_id:{place_id}"
-            photo_url = get_place_photo_url(place['photos'][0]['photo_reference'], google_key) if place.get('photos') else ""
+            photo_url = get_place_photo_url(place['photos'][0]['photo_reference'], google_key) if place.get('photos') else DEFAULT_IMG
             reviews = get_reviews(place_id, google_key, 1)
-            review_html = render_reviews(reviews)
+            review_html = render_reviews(reviews) if reviews else ""
             st.markdown(f"""
                 <div style='background:#f9f9f9; padding:10px; border-radius:10px; height:460px;'>
                     <div style='display:flex; justify-content:space-between;'>
@@ -141,7 +145,19 @@ def display_top_attractions(places):
                 </div>
             """, unsafe_allow_html=True)
 
-# ✅ 추천 맛집 카드 출력 (디자인 유지)
+# ✅ 리뷰 HTML 렌더링
+def render_reviews(reviews):
+    review_blocks = []
+    for r in reviews:
+        author = r.get('author_name', '익명')
+        rating = r.get('rating', '')
+        text = textwrap.shorten(r.get('text', ''), width=80, placeholder='…')
+        block = f"<div style='background:#f1f1f1; border-radius:8px; padding:10px; margin-top:5px;'>"
+        block += f"<b>{author}</b> ⭐ {rating}<br><span style='font-size:14px;'>{text}</span></div>"
+        review_blocks.append(block)
+    return "".join(review_blocks)
+
+# ✅ 추천 맛집 카드 출력
 def display_top_restaurants(df):
     st.markdown("---")
     st.markdown("#### 🍽 추천 맛집 Top 5")
@@ -154,9 +170,15 @@ def display_top_restaurants(df):
             address = row['주소']
             place_id = row.get('place_id')
             link = f"https://www.google.com/maps/place/?q=place_id:{place_id}"
-            photo_url = get_place_photo_url(row['photos'][0]['photo_reference'], google_key) if row.get('photos') else ""
+
+            if row.get('photos') and row['photos'][0].get('photo_reference'):
+                photo_url = get_place_photo_url(row['photos'][0]['photo_reference'], google_key)
+            else:
+                photo_url = DEFAULT_IMG
+
             reviews = get_reviews(place_id, google_key, 1)
-            review_html = render_reviews(reviews)
+            review_html = render_reviews(reviews) if reviews else ""
+
             st.markdown(f"""
                 <div style='background:#f9f9f9; padding:10px; border-radius:10px; height:460px;'>
                     <div style='display:flex; justify-content:space-between;'>
@@ -193,7 +215,7 @@ def main():
 
         address = selected_place.get('formatted_address', '')
         rating = selected_place.get('rating', '')
-        photo = get_place_photo_url(selected_place['photos'][0]['photo_reference'], google_key) if selected_place.get('photos') else ""
+        photo = get_place_photo_url(selected_place['photos'][0]['photo_reference'], google_key) if selected_place.get('photos') else DEFAULT_IMG
         lat, lng = get_lat_lng(address, google_key)
 
         st.markdown(f"### 🏞 관광지: {selected}")
@@ -223,13 +245,13 @@ def main():
         st.markdown("---")
         st.subheader("🗺 지도에서 보기 (카카오맵)")
 
-        # ✅ Kakao Map 표시 (전화번호 → 없으면 주소+이름)
         places_js = ""
-        for _, row in df.iterrows():
+        for _, row in df.head(5).iterrows():  # ✅ 지도에도 Top 5만
             if row["전화번호"] != "없음":
                 search_key = row["전화번호"]
             else:
-                search_key = f"{row['주소']} {row['이름']}"
+                region = extract_region(row["주소"])
+                search_key = f"{region} {row['이름']}"
             places_js += f'''
                 {{
                     name: "{row["이름"]}",
