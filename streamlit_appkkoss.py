@@ -2,15 +2,16 @@ import streamlit as st
 import pandas as pd
 import requests
 import time
-import folium
-from streamlit_folium import st_folium
-from dotenv import load_dotenv
 import os
 import re
+import streamlit.components.v1 as components
+from dotenv import load_dotenv
 
 load_dotenv()
-api_key = os.getenv("Google_key")
+google_key = os.getenv("Google_key")
+kakao_key = os.getenv("KAKAO_KEY")
 
+# ✅ 맛집 데이터 전처리
 def preprocess_restaurant_data(df):
     # 이름 전처리
     df['이름'] = df['이름'].astype(str).str.strip()
@@ -33,11 +34,12 @@ def preprocess_restaurant_data(df):
     df = df[df['주소'].str.strip() != '']
     df = df.dropna(subset=['주소'])
 
-    # 정렬
+    # 평점 기준 정렬
     df = df.sort_values(by='평점', ascending=False)
 
     return df.reset_index(drop=True)
 
+# ✅ 구글 API - 주소 → 위경도 변환
 def get_lat_lng(address, api_key):
     url = "https://maps.googleapis.com/maps/api/geocode/json"
     params = {'address': address, 'language': 'ko', 'key': api_key}
@@ -47,7 +49,7 @@ def get_lat_lng(address, api_key):
         return location['lat'], location['lng']
     return None, None
 
-# 3km로 잡긴 했는데 조금 근처에 잡고 싶어서 2km로 했습니다.
+# ✅ 구글 API - 주변 맛집 검색
 def find_nearby_restaurants(lat, lng, api_key, radius=2000):
     url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
     params = {
@@ -71,17 +73,19 @@ def find_nearby_restaurants(lat, lng, api_key, radius=2000):
         })
     return restaurants
 
+# ✅ 구글 API - 관광지 검색
 def search_places(query, api_key):
     url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
     params = {'query': f"{query} 관광지", 'language': 'ko', 'key': api_key}
     res = requests.get(url, params=params).json()
     return res.get('results', [])
 
+# ✅ 메인 함수
 def main():
     st.set_page_config(page_title="관광지 주변 맛집 추천", layout="wide")
     st.title("📍 관광지 주변 맛집 추천 시스템")
 
-    if not api_key:
+    if not google_key:
         st.error("❗ .env 파일에 'Google_key'가 설정되지 않았습니다.")
         return
 
@@ -94,8 +98,8 @@ def main():
         st.session_state.selected_place = None
 
     if st.button("관광지 검색"):
-        st.session_state.places = search_places(query, api_key)
-        st.session_state.selected_place = None  # 관광지 새로 검색하면 선택 초기화
+        st.session_state.places = search_places(query, google_key)
+        st.session_state.selected_place = None
 
     if st.session_state.places:
         place_names = [p['name'] for p in st.session_state.places]
@@ -104,7 +108,10 @@ def main():
         if st.session_state.selected_place != selected:
             st.session_state.selected_place = selected
 
-        selected_place = next(p for p in st.session_state.places if p['name'] == st.session_state.selected_place)
+        selected_place = next(
+            p for p in st.session_state.places
+            if p['name'] == st.session_state.selected_place
+        )
         address = selected_place.get('formatted_address')
         rating = selected_place.get('rating', '없음')
 
@@ -112,32 +119,79 @@ def main():
         st.write(f"📍 주소: {address}")
         st.write(f"⭐ 평점: {rating}")
 
-        lat, lng = get_lat_lng(address, api_key)
+        lat, lng = get_lat_lng(address, google_key)
         if lat is None:
             st.error("위치 정보를 불러오지 못했습니다.")
             return
 
         st.subheader("🍽 주변 3km 맛집 Top 10")
 
-        restaurants = find_nearby_restaurants(lat, lng, api_key)
+        restaurants = find_nearby_restaurants(lat, lng, google_key)
         df = pd.DataFrame(restaurants)
         df = preprocess_restaurant_data(df)
 
-        st.dataframe(df[['이름', '주소', '평점']].head(10))  # Top 10만 출력
+        st.dataframe(df[['이름', '주소', '평점']].head(10))
 
-        st.subheader("🗺 지도에서 보기")
-        m = folium.Map(location=[lat, lng], zoom_start=13)
-        folium.Marker([lat, lng], tooltip="관광지", icon=folium.Icon(color="blue")).add_to(m)
+        # ✅ 카카오맵 마커 출력
+        st.subheader("🗺 지도에서 보기 (카카오맵)")
 
-        for _, r in df.iterrows():
-            folium.Marker(
-                [r['위도'], r['경도']],
-                tooltip=f"{r['이름']} (⭐{r['평점']})",
-                icon=folium.Icon(color="green", icon="cutlery", prefix='fa')
-            ).add_to(m)
+        # DataFrame → JS 배열 변환 (위도, 경도 포함)
+        places_js = ""
+        for _, row in df.head(10).iterrows():
+            places_js += f'''
+                {{
+                    name: "{row["이름"]}",
+                    address: "{row["주소"]}",
+                    lat: {row["위도"]},
+                    lng: {row["경도"]}
+                }},
+            '''
 
-        st_folium(m, width=700, height=500)
+        html_code = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <script type="text/javascript"
+                src="//dapi.kakao.com/v2/maps/sdk.js?appkey={kakao_key}">
+            </script>
+        </head>
+        <body>
+            <div id="map" style="width:100%; height:500px;"></div>
 
+            <script>
+                var mapContainer = document.getElementById('map');
+                var mapOption = {{
+                    center: new kakao.maps.LatLng({lat}, {lng}),
+                    level: 4
+                }};
+                var map = new kakao.maps.Map(mapContainer, mapOption);
+
+                var places = [{places_js}];
+
+                places.forEach(function(p) {{
+                    var coords = new kakao.maps.LatLng(p.lat, p.lng);
+
+                    var marker = new kakao.maps.Marker({{
+                        map: map,
+                        position: coords
+                    }});
+
+                    var infowindow = new kakao.maps.InfoWindow({{
+                        content: "<div style='padding:5px; font-size:13px;'>"
+                                  + p.name + "<br>" + p.address + "</div>"
+                    }});
+
+                    infowindow.open(map, marker);
+                }});
+            </script>
+        </body>
+        </html>
+        """
+
+        components.html(html_code, height=550)
+
+        # ✅ CSV 다운로드
         csv = df.to_csv(index=False).encode('utf-8')
         st.download_button(
             label="📥 맛집 목록 CSV 다운로드",
